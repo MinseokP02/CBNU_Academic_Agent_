@@ -1,23 +1,71 @@
 flowchart TD
-    START([START]) --> classify_request[요청 분류]
-    classify_request -->|academic_rag| crawl_realtime_web[실시간 웹 크롤링 Tool]
-    classify_request -->|date_calc| date_calc[날짜 계산 Tool]
-    classify_request -->|todo| todo_breakdown[Todo 자동 분해 Tool]
-    classify_request -->|guardrail| guardrail[가드레일 응답]
-    crawl_realtime_web --> chroma_index[학사/공지 Chroma 저장]
-    chroma_index --> sqlite_change[SQLite 공지 변경 감지]
-    sqlite_change --> calendar_update[Calendar 이벤트 반영]
-    calendar_update --> rag_search[Hybrid RAG 검색]
-    rag_search -->|검색 부족| expand_query[검색어 확장]
-    expand_query --> crawl_realtime_web
-    rag_search -->|검색 충분| extract_schedule[OutputParser 일정 추출]
-    extract_schedule --> calendar_from_chat[채팅 추출 일정 Calendar 저장]
-    calendar_from_chat --> answer[최종 답변 생성]
-    answer --> END([END])
-    date_calc --> END
-    todo_breakdown --> END
-    guardrail --> END
+    START([START]) --> agent[agent: LLM bind_tools]
 
-    profile_upload[사용자 프로필 PDF 업로드] --> pdf_parse[PDF 텍스트 추출]
-    pdf_parse --> profile_chroma[Profile Chroma 저장]
-    profile_chroma -. 개인 맥락 검색 .-> rag_search
+    agent -->|tool_calls 있음| tools[ToolNode: AUTONOMOUS_TOOLS 실행]
+    agent -->|tool_calls 없음| END([END])
+
+    tools --> process[process_tool_results]
+
+    process -->|route == academic_rag| extract[extract_schedule: PydanticOutputParser 일정 추출]
+    process -->|route != academic_rag| END
+
+    extract --> answer[answer: RAG 문맥 기반 최종 답변]
+    answer --> END
+
+    subgraph autonomous_tools[AUTONOMOUS_TOOLS]
+        academic_rag[academic_rag_tool]
+        department_notice[cbnu_department_notice_tavily_tool]
+        date_calc[date_calculator_tool]
+        todo_breakdown[todo_breakdown_tool]
+    end
+
+    tools -. 실행 가능 .-> academic_rag
+    tools -. 실행 가능 .-> department_notice
+    tools -. 실행 가능 .-> date_calc
+    tools -. 실행 가능 .-> todo_breakdown
+
+    academic_rag -. ToolMessage .-> process
+    department_notice -. ToolMessage .-> process
+    date_calc -. ToolMessage .-> process
+    todo_breakdown -. ToolMessage .-> process
+
+    academic_rag --> crawl[충북대 기본/단과대/추가 URL 크롤링]
+    crawl --> chroma[cbnu_academic_docs Chroma 저장]
+    chroma --> rag_search[Hybrid RAG 검색]
+
+    department_notice --> tavily[Tavily 학과 공지 검색]
+    tavily --> filter_notice[게시일 추정 및 최신순 정렬/무관 URL 필터링]
+    filter_notice --> chroma
+
+    todo_breakdown --> todo_filter[요청 시각 이후 Todo 필터링]
+    todo_filter --> todo_calendar[Todo Calendar 저장]
+
+    answer --> schedule_calendar[채팅 추출 일정 Calendar 저장]
+
+    subgraph api_side_flows[API 보조 흐름]
+        middleware[RequestLoggingMiddleware]
+        chat[POST /api/chat]
+        profile[Profile JSON 저장/조회]
+        sync[POST /api/crawl/sync]
+        calendar_api[GET /api/calendar]
+        changes_api[GET /api/changes]
+        profile_pdf[Profile PDF 업로드]
+    end
+
+    middleware --> chat
+    profile --> chat
+    chat --> START
+
+    sync --> schedule_loader[현재 연도 학사 일정 로더]
+    sync --> notice_crawl[공지 크롤링]
+    schedule_loader --> calendar_db[(SQLite calendar_events)]
+    notice_crawl --> chroma
+    notice_crawl --> change_store[(SQLite notices / notice_changes)]
+    change_store --> calendar_db
+
+    schedule_calendar --> calendar_db
+    todo_calendar --> calendar_db
+    calendar_db --> calendar_api
+    change_store --> changes_api
+
+    profile_pdf --> profile_chroma[user_profile_pdf Chroma 저장]

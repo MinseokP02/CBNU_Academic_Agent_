@@ -2,7 +2,7 @@
 
 충북대학교 학사 일정, 공지, 개인 프로필을 바탕으로 학생에게 필요한 일정과 할 일을 정리해주는 FastAPI + LangGraph 기반 학사 플래너 Agent입니다.
 
-사용자는 웹 채팅창에 자연어로 질문하고, Agent는 요청을 분류한 뒤 필요한 Tool과 RAG 파이프라인을 실행합니다. Calendar UI에는 학사 일정, 공지 변경 감지 결과, 채팅에서 추출된 일정, Todo 일정이 함께 표시됩니다.
+사용자는 웹 채팅창에 자연어로 질문하고, Agent는 `bind_tools`로 연결된 Tool 중 필요한 도구를 자율적으로 선택해 실행합니다. Calendar UI에는 학사 일정, 공지 변경 감지 결과, 채팅에서 추출된 일정, Todo 일정이 함께 표시됩니다.
 
 ## 문제 정의
 
@@ -14,10 +14,12 @@
 
 - FastAPI 기반 Web Chat UI
 - LangGraph `StateGraph` 기반 Agent 실행 흐름
-- 자연어 요청 분류: 학사 RAG, 날짜 계산, Todo 분해, 가드레일
+- LLM `bind_tools` 기반 자율 Tool 선택 및 `ToolNode` 실행
 - 충북대학교 공식/단과대학/추가 URL 실시간 크롤링
+- Tavily 기반 학과별 공지사항 검색 및 최신순 정렬
 - Persistent Chroma + Runtime 문서 기반 Hybrid RAG
 - 현재 연도 1월 1일부터 12월 31일까지 Calendar 표시
+- Calendar 날짜 클릭 시 해당 날짜의 일정/Todo 상세 확인
 - 공지 신규/변경 감지 결과 SQLite 저장
 - 학사 일정/공지/채팅 추출 일정 Calendar 저장
 - 채팅 기반 Todo 자동 분해 및 Calendar 반영
@@ -36,41 +38,84 @@
 2026-08-05까지 며칠 남았어?
 장학금 신청 준비를 할 일로 나눠줘
 내 학과 기준으로 중요한 공지만 알려줘
+컴퓨터공학과 공지사항 최신 것부터 알려줘
+소프트웨어학부 장학 공지 찾아줘
 ```
 
 ## 실행 흐름
 
 ```mermaid
 flowchart TD
-    client[Web UI] --> middleware[RequestLoggingMiddleware]
-    middleware --> chat[POST /api/chat]
-    profile[Profile 설정 JSON] --> chat
-    chat --> graph[LangGraph StateGraph]
+    START([START]) --> agent[agent: LLM bind_tools]
 
-    graph --> classify[classify_request]
-    classify -->|academic_rag| crawl[realtime_cbnu_crawl_tool]
-    classify -->|date_calc| datecalc[date_calculator_tool]
-    classify -->|todo| todo[todo_breakdown_tool]
-    classify -->|guardrail| guardrail[guardrail 응답]
+    agent -->|tool_calls 있음| tools[ToolNode: AUTONOMOUS_TOOLS 실행]
+    agent -->|tool_calls 없음| END([END])
 
-    crawl --> rag[runtime_rag_search_tool]
-    rag -->|검색 부족| expand[expand_query]
-    expand --> crawl
-    rag -->|검색 충분| extract[OutputParser 일정 추출]
-    extract --> answer[최종 답변]
+    tools --> process[process_tool_results]
 
-    todo --> todo_filter[요청 시각 이후 Todo 필터링]
+    process -->|route == academic_rag| extract[extract_schedule: PydanticOutputParser 일정 추출]
+    process -->|route != academic_rag| END
+
+    extract --> answer[answer: RAG 문맥 기반 최종 답변]
+    answer --> END
+
+    subgraph autonomous_tools[AUTONOMOUS_TOOLS]
+        academic_rag[academic_rag_tool]
+        department_notice[cbnu_department_notice_tavily_tool]
+        date_calc[date_calculator_tool]
+        todo_breakdown[todo_breakdown_tool]
+    end
+
+    tools -. 실행 가능 .-> academic_rag
+    tools -. 실행 가능 .-> department_notice
+    tools -. 실행 가능 .-> date_calc
+    tools -. 실행 가능 .-> todo_breakdown
+
+    academic_rag -. ToolMessage .-> process
+    department_notice -. ToolMessage .-> process
+    date_calc -. ToolMessage .-> process
+    todo_breakdown -. ToolMessage .-> process
+
+    academic_rag --> crawl[충북대 기본/단과대/추가 URL 크롤링]
+    crawl --> chroma[cbnu_academic_docs Chroma 저장]
+    chroma --> rag_search[Hybrid RAG 검색]
+
+    department_notice --> tavily[Tavily 학과 공지 검색]
+    tavily --> filter_notice[게시일 추정 및 최신순 정렬/무관 URL 필터링]
+    filter_notice --> chroma
+
+    todo_breakdown --> todo_filter[요청 시각 이후 Todo 필터링]
     todo_filter --> todo_calendar[Todo Calendar 저장]
+
     answer --> schedule_calendar[채팅 추출 일정 Calendar 저장]
 
-    sync[POST /api/crawl/sync] --> schedule_loader[학사 일정 로더]
-    sync --> notice_crawl[공지 크롤링]
-    notice_crawl --> chroma[Chroma 저장]
-    notice_crawl --> change_detect[SQLite 변경 감지]
-    change_detect --> calendar[Calendar 이벤트]
-    schedule_loader --> calendar
+    subgraph api_side_flows[API 보조 흐름]
+        middleware[RequestLoggingMiddleware]
+        chat[POST /api/chat]
+        profile[Profile JSON 저장/조회]
+        sync[POST /api/crawl/sync]
+        calendar_api[GET /api/calendar]
+        changes_api[GET /api/changes]
+        profile_pdf[Profile PDF 업로드]
+    end
 
-    calendar --> ui_calendar[Calendar UI]
+    middleware --> chat
+    profile --> chat
+    chat --> START
+
+    sync --> schedule_loader[현재 연도 학사 일정 로더]
+    sync --> notice_crawl[공지 크롤링]
+    schedule_loader --> calendar_db[(SQLite calendar_events)]
+    notice_crawl --> chroma
+    notice_crawl --> change_store[(SQLite notices / notice_changes)]
+    change_store --> calendar_db
+
+    schedule_calendar --> calendar_db
+    todo_calendar --> calendar_db
+    calendar_db --> calendar_api
+    change_store --> changes_api
+
+    profile_pdf --> profile_chroma[user_profile_pdf Chroma 저장]
 ```
 
 서버 실행 후 LangGraph 다이어그램은 다음 주소에서도 확인할 수 있습니다.
@@ -132,12 +177,16 @@ cp .env.example .env
 
 ```env
 OPENAI_API_KEY=your_openai_api_key_here
+TAVILY_API_KEY=tvly-your-api-key
 OPENAI_MODEL=gpt-4o-mini
 OPENAI_EMBEDDING_MODEL=text-embedding-3-small
+CBNU_DEPARTMENT_NOTICE_DOMAINS=cbnu.ac.kr,chungbuk.ac.kr,software.cbnu.ac.kr,computer.chungbuk.ac.kr
 CBNU_EXTRA_SOURCES=https://department1.example.edu,https://department2.example.edu
 ```
 
 `CBNU_EXTRA_SOURCES`는 선택값입니다. 기본 충북대학교 공식/단과대학 URL 외에 특정 학과 홈페이지를 더 크롤링하고 싶을 때 쉼표로 구분해 추가합니다.
+
+`TAVILY_API_KEY`는 학과별 공지사항 검색 Tool에서 사용합니다. `CBNU_DEPARTMENT_NOTICE_DOMAINS`는 Tavily 검색을 제한할 도메인 목록이며, 쉼표로 여러 도메인을 지정할 수 있습니다. 도메인 제한 검색에서 결과가 부족하면 Tool이 한 번 더 넓게 검색한 뒤 충북대학교/학과 공지로 보이는 URL만 필터링합니다.
 
 ### 4. 서버 실행
 
@@ -171,7 +220,7 @@ http://127.0.0.1:8000
 
 ### Chat
 
-사용자 자연어 요청을 받아 LangGraph Agent를 실행합니다. Agent는 요청을 분류하고 필요한 Tool을 실행합니다.
+사용자 자연어 요청을 받아 LangGraph Agent를 실행합니다. Agent는 `bind_tools`로 연결된 도구 중 필요한 것을 직접 선택하고, `ToolNode`가 실제 도구를 실행합니다.
 
 ### Todo
 
@@ -189,6 +238,8 @@ Calendar에는 다음 항목이 표시됩니다.
 - 공지 변경 감지에서 추출된 일정
 - 채팅에서 추출된 일정
 - Todo 자동 분해 결과
+
+Calendar의 날짜 칸을 클릭하면 해당 날짜에 저장된 일정과 Todo가 상세 패널에 분리되어 표시됩니다.
 
 ## API
 
@@ -242,14 +293,6 @@ POST /api/profile
 GET /api/profile/{session_id}
 ```
 
-### Profile PDF 업로드
-
-```http
-POST /api/profile/upload
-```
-
-레거시/보조 기능입니다. PDF 텍스트를 추출해 `user_profile_pdf` Chroma collection에 저장합니다. 현재 Web UI의 기본 개인화 흐름은 직접 입력 Profile입니다.
-
 ### 공지/학사일정 동기화
 
 ```http
@@ -287,7 +330,7 @@ SQLite에 기록된 신규/변경 공지 이력을 반환합니다.
 POST /api/todos/breakdown
 ```
 
-보조 API입니다. Web UI에서는 별도 입력칸 없이 `/api/chat`을 통해 Todo를 생성합니다.
+보조 API입니다. Web UI에서는 입력을 통해 `/api/chat`을 통해 Todo를 생성합니다.
 
 ### Mermaid Graph
 
@@ -316,20 +359,18 @@ Agent 상태는 `app/agent/graph.py`의 `AgentState`로 관리합니다.
 
 노드:
 
-- `classify_request`
-- `crawl_realtime_web`
-- `rag_search`
-- `expand_query`
-- `extract_schedule`
-- `answer`
-- `date_calc`
-- `todo`
-- `guardrail`
+- `agent`: LLM이 `bind_tools`로 연결된 Tool 중 필요한 Tool을 선택
+- `tools`: LangGraph `ToolNode`가 `AIMessage.tool_calls`를 실제 실행
+- `process_tool_results`: Tool 실행 결과를 `context_docs`, `todos`, `answer` 상태로 변환
+- `extract_schedule`: RAG 문맥에서 일정 JSON 추출
+- `answer`: RAG 문맥과 일정 JSON을 바탕으로 최종 답변 생성
 
 조건부 분기:
 
-- `classify_request` 결과에 따라 `academic_rag`, `date_calc`, `todo`, `guardrail`로 이동
-- `rag_search` 결과가 부족하면 `expand_query` 후 재검색, 충분하면 일정 추출로 이동
+- `agent` 결과에 `tool_calls`가 있으면 `tools`로 이동
+- `tool_calls`가 없으면 바로 종료하며 직접 응답 또는 가드레일 응답 사용
+- Tool 결과가 `academic_rag_tool` 또는 `cbnu_department_notice_tavily_tool`이면 일정 추출과 최종 답변 생성으로 이동
+- Tool 결과가 날짜 계산 또는 Todo이면 후처리 후 종료
 
 Memory:
 
@@ -339,13 +380,21 @@ Memory:
 
 ## Tools
 
-### `realtime_cbnu_crawl_tool`
+### `academic_rag_tool`
 
-충북대학교 기본/단과대학/추가 URL을 실시간 크롤링해 관련 문서 후보를 가져옵니다.
+충북대학교 학사/공지 질문에 대해 실시간 크롤링, Chroma 저장, Hybrid RAG 검색을 한 번에 수행합니다. Agent가 학사 질문이라고 판단하면 우선 선택하는 도구입니다.
 
-### `runtime_rag_search_tool`
+### `cbnu_department_notice_tavily_tool`
 
-실시간 크롤링 문서를 Chroma에 저장하고, Persistent Chroma와 Runtime 문서를 함께 검색합니다.
+Tavily Search API로 충북대학교 특정 학과 공지사항을 검색하고, 검색 결과를 Chroma에 저장합니다. 사용자가 학과명을 직접 말하거나 Profile에 학과가 설정되어 있으면 Agent가 `department_name`을 채워 호출합니다.
+
+현재 구현은 다음 처리를 포함합니다.
+
+- `department_name`, `query`, `max_results`를 받아 학과 공지 검색어 생성
+- Tavily 결과에서 게시일을 추정해 최신순 정렬
+- 통합검색 페이지, 첨부파일 다운로드 URL, 외부 대학/무관 URL 필터링
+- `published_date`와 출처 URL을 답변 문맥에 포함
+- 검색 결과를 `cbnu_academic_docs` Chroma collection에 저장
 
 ### `date_calculator_tool`
 
@@ -359,7 +408,7 @@ Memory:
 
 RAG 파이프라인은 `app/services/rag.py`, `app/services/vector_db.py`, `app/agent/tools.py`에 걸쳐 구성됩니다.
 
-1. 크롤러가 충북대학교 관련 문서를 수집
+1. 크롤러 또는 Tavily 학과 공지 Tool이 충북대학교 관련 문서를 수집
 2. `Document`로 변환
 3. `cbnu_academic_docs` Chroma collection에 저장
 4. 요청 시점의 Runtime 문서와 Persistent Chroma 문서를 함께 검색
@@ -464,7 +513,10 @@ cbnu_academic_agent/
 - Profile을 Agent 요청 메타데이터에 반영
 - PDF 업로드 후 Chroma 저장 보조 기능 유지
 - 학사 일정/공지 크롤링 후 Chroma 저장
+- Tavily 기반 학과별 공지사항 검색 Tool 추가
+- 학과 공지 검색 결과 최신순 정렬 및 무관 결과 필터링
 - Calendar UI 추가
+- Calendar 날짜 클릭 상세 패널 추가
 - 공지 변경 감지용 SQLite 추가
 - 변경 감지 결과 Calendar 반영
 - Todo 자동 분해 Tool 추가
@@ -474,11 +526,14 @@ cbnu_academic_agent/
 
 ## 한계 및 개선 방향
 
+### 한계
 - Chroma/SQLite/프로필 JSON은 로컬 파일 기반입니다. 운영 환경에서는 사용자 인증, 백업, 동시성 전략이 필요합니다.
 - `InMemorySaver` 기반 대화 이력은 프로세스 재시작 시 사라집니다.
 - 학교 홈페이지 HTML 구조가 바뀌면 크롤링 품질이 달라질 수 있습니다.
 - HWP 등 첨부파일 파싱은 현재 범위에 포함하지 않았습니다.
-- 향후 Google Calendar 연동, 알림, 사용자별 로그인, Profile DB 저장, 일정 수정/삭제 UI를 추가할 수 있습니다.
+
+### 개선 방향
+- 향후 Google Calendar 연동, 사용자별 로그인, Profile DB 저장, 일정 수정/삭제 UI를 추가함으로써 Calendar 관련 기능까지 포함하여 개인 별 학부 일정 관리를 Agent를 통해 단순화 할 수 있습니다.
 
 ## 참고
 
