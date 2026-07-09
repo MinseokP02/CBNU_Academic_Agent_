@@ -120,6 +120,8 @@ CBNU_EXTRA_SOURCES=https://department1.example.edu,https://department2.example.e
 
 `CBNU_EXTRA_SOURCES`는 선택값입니다. 기본 충북대학교 공식/단과대학 소스 외에 특정 학과 독립 홈페이지를 더 크롤링하고 싶을 때 쉼표로 구분해 추가합니다.
 
+학부일정 동기화와 Calendar API는 서버 실행 시점의 현재 연도를 기준으로 `YYYY-01-01`부터 `YYYY-12-31`까지를 사용합니다.
+
 ### 4.4. 서버 실행
 
 ```bash
@@ -192,6 +194,7 @@ POST /api/crawl/sync
 ```
 
 충북대학교 학사/공지 페이지를 크롤링하고 Chroma에 저장합니다. URL별 content hash를 SQLite에 저장해 신규/변경/동일을 감지합니다.
+추가로 충북대학교 학부일정 페이지의 연도별 전체 일정(`currentY={year}&month=all`)을 읽어 현재 연도의 1월 1일부터 12월 31일까지 Calendar에 저장합니다.
 
 ### Calendar
 

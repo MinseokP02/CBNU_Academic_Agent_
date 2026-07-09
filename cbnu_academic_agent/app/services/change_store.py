@@ -4,6 +4,7 @@ import hashlib
 import re
 import sqlite3
 from datetime import datetime
+from datetime import date as Date
 from typing import Any
 
 from langchain_core.documents import Document
@@ -105,49 +106,62 @@ def detect_and_store_changes(docs: list[Document]) -> dict[str, Any]:
                     "UPDATE notices SET last_seen_at = ? WHERE source_url = ?",
                     (now, source_url),
                 )
-                continue
+                change_type = "unchanged"
 
-            conn.execute(
-                """
-                INSERT INTO notice_changes(source_url, title, change_type, content_hash, detected_at)
-                VALUES (?, ?, ?, ?, ?)
-                """,
-                (source_url, title, change_type, digest, now),
-            )
+            if change_type in {"new", "changed"}:
+                conn.execute(
+                    """
+                    INSERT INTO notice_changes(source_url, title, change_type, content_hash, detected_at)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (source_url, title, change_type, digest, now),
+                )
 
-            event = event_from_document(doc, change_type)
-            if event:
+            for event in events_from_document(doc, change_type):
                 event_id = insert_calendar_event(conn, event)
-                event["id"] = event_id
-                events.append(event)
+                if event_id:
+                    event["id"] = event_id
+                    events.append(event)
 
         conn.commit()
 
     return {"stats": stats, "events": events}
 
 
-def event_from_document(doc: Document, change_type: str) -> dict[str, Any] | None:
+def events_from_document(doc: Document, change_type: str) -> list[dict[str, Any]]:
     text = doc.page_content
-    match = DATE_PATTERN.search(text)
-    if not match:
-        return None
-
-    year, month, day = match.groups()
-    date_text = f"{int(year):04d}-{int(month):02d}-{int(day):02d}"
     title = doc.metadata.get("title", "충북대학교 공지")
-    evidence_start = max(0, match.start() - 80)
-    evidence_end = min(len(text), match.end() + 160)
-    return {
-        "title": title,
-        "category": infer_category(f"{title} {text[:500]}"),
-        "start_date": date_text,
-        "end_date": None,
-        "deadline": date_text if "마감" in text[:1000] or "신청" in text[:1000] else None,
-        "importance": "high" if any(word in text[:1000] for word in ("마감", "신청", "등록", "수강")) else "medium",
-        "source_url": doc.metadata.get("source", ""),
-        "evidence": text[evidence_start:evidence_end].strip(),
-        "change_type": change_type,
-    }
+    events: list[dict[str, Any]] = []
+    seen_dates: set[str] = set()
+
+    for match in DATE_PATTERN.finditer(text):
+        year, month, day = match.groups()
+        date_text = f"{int(year):04d}-{int(month):02d}-{int(day):02d}"
+        if date_text in seen_dates:
+            continue
+        seen_dates.add(date_text)
+
+        evidence_start = max(0, match.start() - 80)
+        evidence_end = min(len(text), match.end() + 160)
+        evidence = text[evidence_start:evidence_end].strip()
+        surrounding = text[max(0, match.start() - 220): min(len(text), match.end() + 220)]
+        is_deadline = any(word in surrounding for word in ("마감", "신청", "접수", "제출", "등록", "납부"))
+
+        events.append(
+            {
+                "title": title,
+                "category": infer_category(f"{title} {surrounding}"),
+                "start_date": date_text,
+                "end_date": None,
+                "deadline": date_text if is_deadline else None,
+                "importance": "high" if is_deadline else "medium",
+                "source_url": doc.metadata.get("source", ""),
+                "evidence": evidence,
+                "change_type": change_type,
+            }
+        )
+
+    return events
 
 
 def infer_category(text: str) -> str:
@@ -169,6 +183,20 @@ def infer_category(text: str) -> str:
 
 
 def insert_calendar_event(conn: sqlite3.Connection, event: dict[str, Any]) -> int:
+    event_date = event.get("deadline") or event.get("start_date") or event.get("end_date")
+    existing = conn.execute(
+        """
+        SELECT id FROM calendar_events
+        WHERE title = ?
+          AND COALESCE(source_url, '') = COALESCE(?, '')
+          AND COALESCE(deadline, start_date, end_date, '') = COALESCE(?, '')
+        LIMIT 1
+        """,
+        (event["title"], event.get("source_url"), event_date),
+    ).fetchone()
+    if existing:
+        return 0
+
     created_at = datetime.now().isoformat(timespec="seconds")
     cursor = conn.execute(
         """
@@ -194,15 +222,61 @@ def insert_calendar_event(conn: sqlite3.Connection, event: dict[str, Any]) -> in
     return int(cursor.lastrowid)
 
 
-def list_calendar_events() -> list[dict[str, Any]]:
+def list_calendar_events(start: Date | None = None, end: Date | None = None) -> list[dict[str, Any]]:
+    params: list[str] = []
+    where = ""
+    if start and end:
+        where = """
+            WHERE COALESCE(deadline, start_date, end_date) >= ?
+              AND COALESCE(deadline, start_date, end_date) <= ?
+        """
+        params = [start.isoformat(), end.isoformat()]
+
     with connect() as conn:
         rows = conn.execute(
-            """
+            f"""
             SELECT id, title, category, start_date, end_date, deadline, importance,
                    source_url, evidence, change_type
             FROM calendar_events
+            {where}
             ORDER BY COALESCE(deadline, start_date, end_date) ASC, id DESC
-            """
+            """,
+            params,
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def find_calendar_events_for_text(text: str, limit: int = 5) -> list[dict[str, Any]]:
+    keywords = [token for token in re.findall(r"[가-힣A-Za-z0-9]+", text) if len(token) >= 2]
+    if not keywords:
+        return []
+
+    settings = get_settings()
+    where_clause = " OR ".join(["title LIKE ? OR evidence LIKE ?" for _ in keywords])
+    params: list[str] = []
+    for keyword in keywords:
+        like = f"%{keyword}%"
+        params.extend([like, like])
+
+    with connect() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT id, title, category, start_date, end_date, deadline, importance,
+                   source_url, evidence, change_type
+            FROM calendar_events
+            WHERE change_type != 'todo'
+              AND COALESCE(deadline, start_date, end_date) >= ?
+              AND COALESCE(deadline, start_date, end_date) <= ?
+              AND ({where_clause})
+            ORDER BY COALESCE(deadline, start_date, end_date) ASC, id DESC
+            LIMIT ?
+            """,
+            [
+                settings.academic_schedule_start.isoformat(),
+                settings.academic_schedule_end.isoformat(),
+                *params,
+                limit,
+            ],
         ).fetchall()
     return [dict(row) for row in rows]
 

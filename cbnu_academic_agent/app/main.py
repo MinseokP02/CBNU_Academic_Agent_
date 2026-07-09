@@ -28,22 +28,24 @@ from app.services.change_store import (
     list_calendar_events,
     list_changes,
 )
+from app.services.academic_schedule import load_academic_schedule_range
 from app.services.crawler import crawl_realtime_sources
 from app.services.todo import breakdown_todos
 from app.services.vector_db import PROFILE_COLLECTION, index_academic_documents, index_profile_pdf
 
 settings = get_settings()
 logging.basicConfig(level=settings.log_level, format="%(asctime)s %(levelname)s %(name)s - %(message)s")
+STATIC_DIR = Path(__file__).resolve().parent / "static"
+INDEX_HTML = STATIC_DIR / "index.html"
 
 app = FastAPI(title=settings.app_name, version="0.1.0")
 app.add_middleware(RequestLoggingMiddleware)
-app.mount("/static", StaticFiles(directory="app/static"), name="static")
+app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 
 @app.get("/", response_class=HTMLResponse)
 def index() -> str:
-    with open("app/static/index.html", "r", encoding="utf-8") as f:
-        return f.read()
+    return INDEX_HTML.read_text(encoding="utf-8")
 
 
 @app.get("/api/health")
@@ -102,13 +104,18 @@ def upload_profile_pdf(file: UploadFile = File(...)):
 
 @app.post("/api/crawl/sync", response_model=CrawlSyncResponse)
 def sync_crawl_to_chroma():
+    schedule_events, schedule_docs = load_academic_schedule_range(
+        settings.academic_schedule_start,
+        settings.academic_schedule_end,
+    )
     docs = crawl_realtime_sources(
         query="충북대학교 학사 일정 공지 수강 장학 등록 졸업 시험",
         seed_urls=settings.default_sources,
         timeout=settings.crawl_timeout,
         max_links=settings.max_links,
     )
-    indexed_count = index_academic_documents(docs)
+    indexed_count = index_academic_documents([*schedule_docs, *docs])
+    stored_schedule_events = store_events_to_calendar(schedule_events)
     change_result = detect_and_store_changes(docs)
     stats = change_result["stats"]
     return CrawlSyncResponse(
@@ -116,13 +123,13 @@ def sync_crawl_to_chroma():
         new_count=stats["new"],
         changed_count=stats["changed"],
         unchanged_count=stats["unchanged"],
-        calendar_events=change_result["events"],
+        calendar_events=[*stored_schedule_events, *change_result["events"]],
     )
 
 
 @app.get("/api/calendar", response_model=list[CalendarEvent])
 def calendar_events():
-    return list_calendar_events()
+    return list_calendar_events(settings.academic_schedule_start, settings.academic_schedule_end)
 
 
 @app.get("/api/changes", response_model=list[ChangeItem])
@@ -132,7 +139,9 @@ def changes():
 
 @app.post("/api/todos/breakdown", response_model=TodoBreakdownResponse)
 def todos_breakdown(req: TodoBreakdownRequest):
-    return TodoBreakdownResponse(todos=breakdown_todos(req.goal))
+    todos = breakdown_todos(req.goal)
+    calendar_events = store_todos_to_calendar(todos, req.goal)
+    return TodoBreakdownResponse(todos=todos, calendar_events=calendar_events)
 
 
 def store_schedules_to_calendar(schedules: list[dict]) -> None:
@@ -155,3 +164,56 @@ def store_schedules_to_calendar(schedules: list[dict]) -> None:
                 },
             )
         conn.commit()
+
+
+def store_events_to_calendar(events: list[dict]) -> list[dict]:
+    stored_events: list[dict] = []
+    if not events:
+        return stored_events
+
+    with connect() as conn:
+        for event in events:
+            event_id = insert_calendar_event(conn, event)
+            if event_id:
+                event = dict(event)
+                event["id"] = event_id
+                stored_events.append(event)
+        conn.commit()
+
+    return stored_events
+
+
+def store_todos_to_calendar(todos: list, goal: str) -> list[dict]:
+    stored_events: list[dict] = []
+    with connect() as conn:
+        for todo in todos:
+            if not todo.due_date:
+                continue
+            event = {
+                "title": f"TODO: {todo.title}",
+                "category": "Todo",
+                "start_date": todo.due_date,
+                "end_date": None,
+                "deadline": todo.due_date,
+                "importance": todo.priority,
+                "source_url": None,
+                "evidence": f"{goal} - {todo.reason}",
+                "change_type": "todo",
+            }
+            event_id = insert_calendar_event(conn, event)
+            if not event_id:
+                existing = conn.execute(
+                    """
+                    SELECT id FROM calendar_events
+                    WHERE title = ?
+                      AND COALESCE(source_url, '') = ''
+                      AND COALESCE(deadline, start_date, end_date, '') = ?
+                    LIMIT 1
+                    """,
+                    (event["title"], todo.due_date),
+                ).fetchone()
+                event_id = int(existing["id"]) if existing else 0
+            if event_id:
+                stored_events.append({**event, "id": event_id})
+        conn.commit()
+    return stored_events

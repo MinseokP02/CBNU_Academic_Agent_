@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 from functools import lru_cache
 from pathlib import Path
+from datetime import date, datetime
 from typing import List
 
 from dotenv import load_dotenv
@@ -30,6 +31,7 @@ class Settings(BaseModel):
 
     crawl_timeout: int = Field(default_factory=lambda: int(os.getenv("CBNU_CRAWL_TIMEOUT", "10")))
     max_links: int = Field(default_factory=lambda: int(os.getenv("CBNU_MAX_LINKS", "40")))
+    current_year: int = Field(default_factory=lambda: datetime.now().year)
 
     project_root: Path = Field(default_factory=lambda: Path(__file__).resolve().parents[1])
     data_dir: Path = Field(default_factory=lambda: Path(os.getenv("CBNU_DATA_DIR", "data")))
@@ -69,6 +71,14 @@ class Settings(BaseModel):
     @property
     def default_sources(self) -> List[str]:
         return list(dict.fromkeys([*self.core_sources, *self.department_sources, *self.extra_sources]))
+
+    @property
+    def academic_schedule_start(self) -> date:
+        return date(self.current_year, 1, 1)
+
+    @property
+    def academic_schedule_end(self) -> date:
+        return date(self.current_year, 12, 31)
 
 
 @lru_cache

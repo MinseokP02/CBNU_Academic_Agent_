@@ -53,8 +53,16 @@
     <section class="calendar-section">
       <div class="section-title">
         <h2>Calendar</h2>
-        <button id="refresh-calendar" type="button">새로고침</button>
+        <div class="calendar-actions">
+          <button id="prev-month" type="button">이전</button>
+          <strong id="calendar-month"></strong>
+          <button id="next-month" type="button">다음</button>
+          <button id="toggle-calendar-range" type="button">전체 보기</button>
+          <button id="refresh-calendar" type="button">새로고침</button>
+        </div>
       </div>
+      <div id="calendar-summary" class="calendar-summary"></div>
+      <div id="calendar-grid" class="calendar-grid"></div>
       <div id="calendar-list" class="calendar-list"></div>
     </section>
 

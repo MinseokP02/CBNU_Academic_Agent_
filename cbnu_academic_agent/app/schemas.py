@@ -96,3 +96,4 @@ class TodoItem(BaseModel):
 
 class TodoBreakdownResponse(BaseModel):
     todos: list[TodoItem] = Field(default_factory=list)
+    calendar_events: list[CalendarEvent] = Field(default_factory=list)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import date, datetime, timedelta
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
@@ -8,6 +9,7 @@ from pydantic import BaseModel, Field
 
 from app.config import get_settings
 from app.schemas import TodoItem
+from app.services.change_store import find_calendar_events_for_text
 
 logger = logging.getLogger(__name__)
 
@@ -18,25 +20,32 @@ class TodoPlan(BaseModel):
 
 def breakdown_todos(goal: str) -> list[TodoItem]:
     settings = get_settings()
+    related_events = find_calendar_events_for_text(goal)
     if not settings.openai_api_key:
-        return fallback_todos(goal)
+        return assign_due_dates(fallback_todos(goal), related_events)
 
     llm = ChatOpenAI(model=settings.openai_model, temperature=0)
     system = SystemMessage(
         content=(
             "너는 충북대학교 학생의 학사 업무를 실행 가능한 Todo로 쪼개는 플래너다. "
             "각 Todo는 한 번에 실행 가능한 짧은 행동이어야 한다. "
-            "날짜가 명시되어 있으면 due_date를 YYYY-MM-DD로 넣고, 모르면 null로 둔다."
+            "참고 일정이 있으면 그 날짜를 기준으로 due_date를 YYYY-MM-DD로 넣는다. "
+            "마감/신청/제출 Todo는 관련 일정의 deadline 또는 start_date 이전으로 잡는다."
         )
     )
-    human = HumanMessage(content=f"목표 또는 일정: {goal}")
+    human = HumanMessage(
+        content=(
+            f"목표 또는 일정: {goal}\n\n"
+            f"캘린더 DB 참고 일정:\n{format_related_events(related_events)}"
+        )
+    )
 
     try:
         plan = llm.with_structured_output(TodoPlan).invoke([system, human])
-        return plan.todos
+        return assign_due_dates(plan.todos, related_events)
     except Exception as exc:
         logger.exception("todo breakdown failed: %s", exc)
-        return fallback_todos(goal)
+        return assign_due_dates(fallback_todos(goal), related_events)
 
 
 def fallback_todos(goal: str) -> list[TodoItem]:
@@ -45,3 +54,91 @@ def fallback_todos(goal: str) -> list[TodoItem]:
         TodoItem(title="필요 서류와 신청 자격 정리", priority="medium", reason="누락된 준비물을 줄이기 위한 단계입니다."),
         TodoItem(title="마감 전 제출 또는 신청 완료", priority="high", reason="학사 업무는 마감 초과 시 처리가 어려울 수 있습니다."),
     ]
+
+
+def assign_due_dates(todos: list[TodoItem], related_events: list[dict]) -> list[TodoItem]:
+    if not related_events:
+        return todos
+
+    primary_event = first_future_event(related_events)
+    if not primary_event:
+        return todos
+
+    event_date = primary_event.get("deadline") or primary_event.get("start_date") or primary_event.get("end_date")
+    if not event_date:
+        return todos
+    event_day = date.fromisoformat(event_date)
+    today = datetime.now().date()
+    last_todo_day = event_day - timedelta(days=1)
+    if last_todo_day < today:
+        return todos
+
+    schedule_dates = distribute_dates(today, last_todo_day, len(todos))
+
+    result: list[TodoItem] = []
+    for index, todo in enumerate(todos):
+        if todo.due_date:
+            todo_day = date.fromisoformat(todo.due_date)
+            if today <= todo_day <= last_todo_day:
+                result.append(todo)
+            else:
+                result.append(
+                    todo.model_copy(
+                        update={
+                            "due_date": schedule_dates[index].isoformat(),
+                            "reason": add_reason_context(todo.reason, primary_event, today, last_todo_day),
+                        }
+                    )
+                )
+            continue
+        result.append(
+            todo.model_copy(
+                update={
+                    "due_date": schedule_dates[index].isoformat(),
+                    "reason": add_reason_context(todo.reason, primary_event, today, last_todo_day),
+                }
+            )
+        )
+    return result
+
+
+def first_future_event(events: list[dict]) -> dict | None:
+    today = datetime.now().date()
+    for event in events:
+        event_date = event.get("deadline") or event.get("start_date") or event.get("end_date")
+        if not event_date:
+            continue
+        if date.fromisoformat(event_date) > today:
+            return event
+    return None
+
+
+def distribute_dates(start: date, end: date, count: int) -> list[date]:
+    if count <= 0:
+        return []
+    if count == 1:
+        return [end]
+
+    total_days = max((end - start).days, 0)
+    return [
+        start + timedelta(days=round(total_days * index / (count - 1)))
+        for index in range(count)
+    ]
+
+
+def add_reason_context(reason: str, event: dict, start: date, end: date) -> str:
+    event_date = event.get("deadline") or event.get("start_date") or event.get("end_date")
+    context = (
+        f"캘린더 일정 '{event.get('title')}'({event_date}) 전까지의 준비 기간 "
+        f"{start.isoformat()}~{end.isoformat()} 안에서 날짜를 지정했습니다."
+    )
+    return f"{reason} {context}".strip()
+
+
+def format_related_events(events: list[dict]) -> str:
+    if not events:
+        return "관련 일정 없음"
+    return "\n".join(
+        f"- {event.get('title')} | {event.get('deadline') or event.get('start_date') or event.get('end_date')} | {event.get('category')}"
+        for event in events
+    )
