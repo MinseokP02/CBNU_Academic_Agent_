@@ -1,0 +1,23 @@
+flowchart TD
+    START([START]) --> classify_request[요청 분류]
+    classify_request -->|academic_rag| crawl_realtime_web[실시간 웹 크롤링 Tool]
+    classify_request -->|date_calc| date_calc[날짜 계산 Tool]
+    classify_request -->|todo| todo_breakdown[Todo 자동 분해 Tool]
+    classify_request -->|guardrail| guardrail[가드레일 응답]
+    crawl_realtime_web --> chroma_index[학사/공지 Chroma 저장]
+    chroma_index --> sqlite_change[SQLite 공지 변경 감지]
+    sqlite_change --> calendar_update[Calendar 이벤트 반영]
+    calendar_update --> rag_search[Hybrid RAG 검색]
+    rag_search -->|검색 부족| expand_query[검색어 확장]
+    expand_query --> crawl_realtime_web
+    rag_search -->|검색 충분| extract_schedule[OutputParser 일정 추출]
+    extract_schedule --> calendar_from_chat[채팅 추출 일정 Calendar 저장]
+    calendar_from_chat --> answer[최종 답변 생성]
+    answer --> END([END])
+    date_calc --> END
+    todo_breakdown --> END
+    guardrail --> END
+
+    profile_upload[사용자 프로필 PDF 업로드] --> pdf_parse[PDF 텍스트 추출]
+    pdf_parse --> profile_chroma[Profile Chroma 저장]
+    profile_chroma -. 개인 맥락 검색 .-> rag_search

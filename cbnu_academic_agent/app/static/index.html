@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>CBNU Academic Planner Agent</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <main class="page">
+    <section class="hero">
+      <p class="eyebrow">LangGraph · RAG · Realtime Crawling</p>
+      <h1>충북대학교 학사 일정 Agent</h1>
+      <p>충북대학교 공지와 학사일정을 실시간으로 크롤링하고, RAG로 검색한 뒤 필요한 일정을 정리합니다.</p>
+    </section>
+
+    <section class="chat-card">
+      <div id="messages" class="messages">
+        <div class="msg assistant">안녕하세요. “이번 달 학사일정 알려줘”, “수강신청 공지 찾아줘”처럼 질문해 주세요.</div>
+      </div>
+      <form id="chat-form" class="chat-form">
+        <input id="message" type="text" placeholder="예: 7월 학사일정 중 중요한 것만 정리해줘" autocomplete="off" />
+        <button type="submit">전송</button>
+      </form>
+    </section>
+
+    <section class="panel-grid">
+      <div class="panel">
+        <h2>Profile PDF</h2>
+        <form id="upload-form" class="inline-form">
+          <input id="profile-pdf" type="file" accept="application/pdf" />
+          <button type="submit">업로드</button>
+        </form>
+        <p id="upload-status" class="status-text"></p>
+      </div>
+
+      <div class="panel">
+        <h2>Sync</h2>
+        <button id="sync-btn" type="button">공지/학사일정 동기화</button>
+        <p id="sync-status" class="status-text"></p>
+      </div>
+
+      <div class="panel">
+        <h2>Todo</h2>
+        <form id="todo-form" class="inline-form">
+          <input id="todo-goal" type="text" placeholder="예: 장학금 신청 준비" autocomplete="off" />
+          <button type="submit">분해</button>
+        </form>
+        <ul id="todo-list" class="compact-list"></ul>
+      </div>
+    </section>
+
+    <section class="calendar-section">
+      <div class="section-title">
+        <h2>Calendar</h2>
+        <button id="refresh-calendar" type="button">새로고침</button>
+      </div>
+      <div id="calendar-list" class="calendar-list"></div>
+    </section>
+
+    <section class="calendar-section">
+      <div class="section-title">
+        <h2>Notice Changes</h2>
+        <button id="refresh-changes" type="button">새로고침</button>
+      </div>
+      <div id="change-list" class="change-list"></div>
+    </section>
+
+    <section class="meta-card">
+      <h2>Workflow</h2>
+      <p><a href="/api/graph/mermaid" target="_blank">LangGraph Mermaid 다이어그램 보기</a></p>
+    </section>
+  </main>
+  <script src="/static/main.js"></script>
+</body>
+</html>
