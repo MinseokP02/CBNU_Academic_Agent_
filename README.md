@@ -152,12 +152,14 @@ pip install -r requirements.txt
 
 주요 패키지는 다음 계열을 사용합니다.
 
-- `langchain>=1.0.0`
-- `langgraph>=1.0.0`
-- `langchain-openai>=1.0.0`
-- `langchain-chroma>=0.2.0`
+- `langchain>=1.3.12,<2.0.0`
+- `langchain-core>=1.4.9,<2.0.0`
+- `langgraph>=1.2.8,<2.0.0`
+- `langchain-openai>=1.3.4,<2.0.0`
+- `langchain-text-splitters>=1.1.2,<2.0.0`
+- `langchain-chroma>=1.1.0,<2.0.0`
 - `fastapi>=0.115.0`
-- `chromadb>=0.5.0`
+- `chromadb>=1.5.9,<2.0.0`
 
 ### 3. 환경변수 설정
 
