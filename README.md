@@ -124,6 +124,140 @@ flowchart TD
 http://127.0.0.1:8000/api/graph/mermaid
 ```
 
+## 파일 기준 실행 흐름
+
+### 1. 서버 시작
+
+```text
+uvicorn app.main:app --reload
+    ↓
+app/main.py
+    ├── get_settings() 호출
+    │   └── app/config.py
+    │       ├── .env 로드
+    │       ├── OPENAI/TAVILY/경로 설정 구성
+    │       └── data/, data/uploads/, data/chroma/, SQLite 부모 폴더 자동 생성
+    ├── RequestLoggingMiddleware 등록
+    │   └── app/middleware/logging.py
+    ├── /static 마운트
+    │   └── app/static/index.html, main.js, style.css
+    └── API 라우터 함수 등록
+```
+
+서버가 시작되면 `app.main:app`이 로드되고, 이 과정에서 `app/agent/graph.py`의 LangGraph도 함께 컴파일됩니다. 대화 메모리는 `InMemorySaver`를 사용하므로 서버 프로세스가 살아 있는 동안 `session_id`별로 유지됩니다.
+
+### 2. 채팅 요청 흐름
+
+```text
+브라우저 Web UI
+    ↓
+app/static/main.js
+    ↓ POST /api/chat
+app/middleware/logging.py
+    ├── request_id 생성
+    ├── requested_at 기록
+    └── request.state.agent_context에 메타데이터 저장
+    ↓
+app/main.py::chat()
+    ├── app/services/profile_store.py
+    │   └── data/profiles.json에서 session_id별 Profile 조회
+    └── app/agent/graph.py::invoke_agent()
+        ↓
+        LangGraph 실행
+        ├── agent_node
+        │   └── LLM이 bind_tools 기반으로 필요한 Tool 선택
+        ├── ToolNode
+        │   └── app/agent/tools.py의 Tool 실행
+        ├── process_tool_results_node
+        │   └── Tool 결과를 route/context_docs/todos/answer로 정리
+        ├── extract_schedule_node
+        │   └── RAG 문맥에서 일정 JSON 추출
+        └── answer_node
+            └── 최종 답변 생성
+    ↓
+app/main.py
+    ├── 추출 일정은 SQLite calendar_events에 저장
+    ├── Todo 요청이면 Todo도 SQLite calendar_events에 저장
+    └── ChatResponse 반환
+```
+
+질문 유형에 따라 실행되는 Tool은 다릅니다.
+
+- 학사/공지 질문: `academic_rag_tool`
+- 특정 학과 공지 질문: `cbnu_department_notice_tavily_tool`
+- 날짜 계산 질문: `date_calculator_tool`
+- 목표/Todo 분해 질문: `todo_breakdown_tool`
+
+### 3. RAG 검색 흐름
+
+```text
+app/agent/tools.py::academic_rag_tool()
+    ├── app/services/crawler.py
+    │   └── 충북대 기본/단과대학/추가 URL 크롤링
+    ├── app/services/vector_db.py
+    │   └── 수집 문서를 data/chroma/cbnu_academic_docs에 저장
+    └── app/services/rag.py
+        ├── Runtime 문서 임시 Chroma 검색
+        ├── Persistent Chroma 검색
+        └── 두 결과를 합쳐 관련 문서 반환
+```
+
+학과 공지 검색은 별도 흐름을 탑니다.
+
+```text
+app/agent/tools.py::cbnu_department_notice_tavily_tool()
+    ├── Tavily Search API 호출
+    ├── 충북대/학과 공지로 보이는 결과만 필터링
+    ├── 게시일 추정 후 최신순 정렬
+    └── app/services/vector_db.py
+        └── 검색 결과를 data/chroma/cbnu_academic_docs에 저장
+```
+
+### 4. 학사 일정/공지 동기화 흐름
+
+```text
+POST /api/crawl/sync
+    ↓
+app/main.py::sync_crawl_to_chroma()
+    ├── app/services/academic_schedule.py
+    │   └── 현재 연도 학사 일정 수집
+    ├── app/services/crawler.py
+    │   └── 공지/학과/추가 URL 문서 수집
+    ├── app/services/vector_db.py
+    │   └── 학사 일정 문서와 공지 문서를 Chroma에 색인
+    └── app/services/change_store.py
+        ├── notices 테이블에 URL별 content_hash 저장
+        ├── notice_changes 테이블에 신규/변경 이력 저장
+        └── calendar_events 테이블에 일정 후보 저장
+```
+
+이 API는 채팅 전에 지식 베이스와 캘린더 데이터를 미리 채워두는 역할을 합니다.
+
+### 5. Profile, Calendar, 변경 이력 흐름
+
+```text
+Profile 저장/조회
+    app/main.py
+        └── app/services/profile_store.py
+            └── data/profiles.json
+
+Calendar 조회
+    app/main.py::calendar_events()
+        └── app/services/change_store.py::list_calendar_events()
+            └── data/cbnu_agent.db의 calendar_events
+
+변경 이력 조회
+    app/main.py::changes()
+        └── app/services/change_store.py::list_changes()
+            └── data/cbnu_agent.db의 notice_changes
+
+Profile PDF 업로드
+    app/main.py::upload_profile_pdf()
+        ├── data/uploads/에 PDF 저장
+        └── app/services/vector_db.py
+            └── data/chroma/user_profile_pdf에 PDF 내용 색인
+```
+
 ## 설치
 
 ### 1. 가상환경 생성
