@@ -76,9 +76,11 @@ flowchart TD
     date_calc -. ToolMessage .-> process
     todo_breakdown -. ToolMessage .-> process
 
+    academic_rag --> chat_schedule_loader[현재 연도 학사 일정 로더]
     academic_rag --> crawl[충북대 기본/단과대/추가 URL 크롤링]
-    crawl --> chroma[cbnu_academic_docs Chroma 저장]
-    chroma --> rag_search[Hybrid RAG 검색]
+    chat_schedule_loader --> chroma[cbnu_academic_docs Chroma 저장]
+    crawl --> chroma
+    chroma --> rag_search[현재 요청 문서 우선 Hybrid RAG 검색]
 
     department_notice --> tavily[Tavily 학과 공지 검색]
     tavily --> filter_notice[게시일 추정 및 최신순 정렬/무관 URL 필터링]
@@ -115,7 +117,7 @@ flowchart TD
     calendar_db --> calendar_api
     change_store --> changes_api
 
-    profile.json --> profile_chroma[user_profile Chroma 저장]
+    profile --> profile_context[LLM SystemMessage 프로필 문맥]
 ```
 
 서버 실행 후 LangGraph 다이어그램은 다음 주소에서도 확인할 수 있습니다.
@@ -192,14 +194,16 @@ app/main.py
 
 ```text
 app/agent/tools.py::academic_rag_tool()
+    ├── app/services/academic_schedule.py
+    │   └── 현재 연도 학사 일정 문서를 먼저 수집
     ├── app/services/crawler.py
     │   └── 충북대 기본/단과대학/추가 URL 크롤링
     ├── app/services/vector_db.py
-    │   └── 수집 문서를 data/chroma/cbnu_academic_docs에 저장
+    │   └── 학사 일정 문서와 크롤링 문서를 data/chroma/cbnu_academic_docs에 저장
     └── app/services/rag.py
-        ├── Runtime 문서 임시 Chroma 검색
-        ├── Persistent Chroma 검색
-        └── 두 결과를 합쳐 관련 문서 반환
+        ├── 현재 요청 문서 Runtime Chroma 검색
+        ├── 기존 Persistent Chroma 검색
+        └── 현재 요청 문서를 우선해서 관련 문서 반환
 ```
 
 학과 공지 검색은 별도 흐름을 탑니다.
@@ -240,6 +244,13 @@ Profile 저장/조회
     app/main.py
         └── app/services/profile_store.py
             └── data/profiles.json
+
+Profile의 LLM 적용
+    app/main.py::chat()
+        ├── session_id 기준 Profile 조회
+        └── app/agent/graph.py::invoke_agent()
+            ├── agent_node에서 SystemMessage로 Profile 전달
+            └── answer_node에서 최종 답변 프롬프트에 Profile 재전달
 
 Calendar 조회
     app/main.py::calendar_events()
@@ -353,6 +364,8 @@ http://127.0.0.1:8000
 - 추가 메모
 
 저장된 Profile은 브라우저 `session_id` 기준으로 `data/profiles.json`에 저장됩니다. 이후 채팅 요청 시 Agent의 `request_metadata.profile`에 포함되어 검색어 보강, 답변 우선순위, Todo 생성에 반영됩니다.
+
+Profile은 Chroma에 저장되는 지식 문서가 아니라, 채팅 요청마다 LLM에 전달되는 프로필 문맥입니다. `agent_node`에서는 Tool 선택과 검색어 구성에 사용되고, `answer_node`에서는 학과, 학년, 관심 항목에 맞춰 답변 우선순위를 정하는 데 사용됩니다.
 
 ### Chat
 
@@ -518,7 +531,7 @@ Memory:
 
 ### `academic_rag_tool`
 
-충북대학교 학사/공지 질문에 대해 실시간 크롤링, Chroma 저장, Hybrid RAG 검색을 한 번에 수행합니다. Agent가 학사 질문이라고 판단하면 우선 선택하는 도구입니다.
+충북대학교 학사/공지 질문에 대해 현재 연도 학사 일정 수집, 실시간 크롤링, Chroma 저장, Hybrid RAG 검색을 한 번에 수행합니다. Agent가 학사 질문이라고 판단하면 우선 선택하는 도구입니다.
 
 ### `cbnu_department_notice_tavily_tool`
 
@@ -542,13 +555,14 @@ Tavily Search API로 충북대학교 특정 학과 공지사항을 검색하고,
 
 ## RAG 구성
 
-RAG 파이프라인은 `app/services/rag.py`, `app/services/vector_db.py`, `app/agent/tools.py`에 걸쳐 구성됩니다.
+RAG 파이프라인은 `app/services/academic_schedule.py`, `app/services/crawler.py`, `app/services/rag.py`, `app/services/vector_db.py`, `app/agent/tools.py`에 걸쳐 구성됩니다.
 
-1. 크롤러 또는 Tavily 학과 공지 Tool이 충북대학교 관련 문서를 수집
-2. `Document`로 변환
-3. `cbnu_academic_docs` Chroma collection에 저장
-4. 요청 시점의 Runtime 문서와 Persistent Chroma 문서를 함께 검색
-5. 검색 결과를 `answer_node`의 LLM 프롬프트에 제공
+1. `academic_rag_tool`이 현재 연도 학사 일정 문서를 먼저 수집
+2. 크롤러 또는 Tavily 학과 공지 Tool이 충북대학교 관련 문서를 수집
+3. 수집 결과를 `Document`로 변환
+4. `cbnu_academic_docs` Chroma collection에 저장
+5. 현재 요청 문서 Runtime Chroma와 기존 Persistent Chroma를 함께 검색
+6. 현재 요청 문서를 우선해 병합한 뒤 `answer_node`의 LLM 프롬프트에 제공
 
 Chroma 저장 경로:
 
