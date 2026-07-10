@@ -115,7 +115,7 @@ flowchart TD
     calendar_db --> calendar_api
     change_store --> changes_api
 
-    profile_pdf --> profile_chroma[user_profile_pdf Chroma 저장]
+    profile_json --> profile_chroma[user_profile Chroma 저장]
 ```
 
 서버 실행 후 LangGraph 다이어그램은 다음 주소에서도 확인할 수 있습니다.
