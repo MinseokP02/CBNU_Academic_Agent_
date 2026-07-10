@@ -1,8 +1,14 @@
 .env
 __pycache__/
 *.pyc
+
 .chroma/
 logs/
 .vscode/
 .idea/
-data/
+
+data/chroma/
+data/cbnu_agent.db
+data/profiles.json
+data/uploads/
+data/uvicorn*.log
