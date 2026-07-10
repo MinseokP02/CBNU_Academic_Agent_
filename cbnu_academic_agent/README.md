@@ -419,10 +419,7 @@ Chroma 저장 경로:
 ```text
 data/chroma/
 ├── cbnu_academic_docs/
-└── user_profile_pdf/
 ```
-
-`user_profile_pdf`는 PDF 업로드 보조 기능에서 사용됩니다.
 
 ## SQLite 저장소
 
