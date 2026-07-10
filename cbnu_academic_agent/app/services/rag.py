@@ -51,12 +51,12 @@ def retrieve_with_runtime_vectorstore(query: str, docs: list[Document], k: int =
 
 def retrieve_with_hybrid_vectorstore(query: str, docs: list[Document], k: int = 5) -> list[Document]:
     """영구 Chroma 지식과 요청 시점 크롤링 문서를 함께 검색한다."""
-    persistent_results = search_persistent_knowledge(query, k=k)
     runtime_results = retrieve_with_runtime_vectorstore(query=query, docs=docs, k=k)
+    persistent_results = search_persistent_knowledge(query, k=k)
 
     merged: list[Document] = []
     seen: set[str] = set()
-    for doc in [*persistent_results, *runtime_results]:
+    for doc in [*runtime_results, *persistent_results]:
         key = f"{doc.metadata.get('source', '')}:{doc.page_content[:120]}"
         if key in seen:
             continue

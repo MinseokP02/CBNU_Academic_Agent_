@@ -10,6 +10,7 @@ from langchain_core.documents import Document
 from langchain_core.tools import tool
 
 from app.config import get_settings
+from app.services.academic_schedule import load_academic_schedule_range
 from app.services.crawler import crawl_realtime_sources
 from app.services.date_utils import days_until
 from app.services.rag import retrieve_with_hybrid_vectorstore
@@ -21,14 +22,19 @@ from app.services.vector_db import index_academic_documents
 def academic_rag_tool(query: str, k: int = 5) -> list[dict[str, Any]]:
     """충북대학교 학사/공지 질문에 대해 실시간 크롤링과 Chroma RAG 검색을 함께 수행한다."""
     settings = get_settings()
+    _, schedule_docs = load_academic_schedule_range(
+        settings.academic_schedule_start,
+        settings.academic_schedule_end,
+    )
     crawled_docs = crawl_realtime_sources(
         query=query,
         seed_urls=settings.default_sources,
         timeout=settings.crawl_timeout,
         max_links=settings.max_links,
     )
-    index_academic_documents(crawled_docs)
-    results = retrieve_with_hybrid_vectorstore(query=query, docs=crawled_docs, k=k)
+    docs = [*schedule_docs, *crawled_docs]
+    index_academic_documents(docs)
+    results = retrieve_with_hybrid_vectorstore(query=query, docs=docs, k=k)
     return [
         {
             "title": doc.metadata.get("title", "제목 없음"),
